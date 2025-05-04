@@ -4,6 +4,10 @@ const path = require('path');
 
 const main = async () => {
   const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, ethers.provider);
+  const sponsor = new ethers.Wallet(process.env.PRIVATE_KEY_2, ethers.provider);
+
+  console.log("Wallet address:", wallet.address);
+  console.log("sponsor address:", sponsor.address);
 
   // Read deployment info from JSON file
   const deploymentPath = path.join(__dirname, '../deployments', `${network.name}.json`);
@@ -36,7 +40,7 @@ const main = async () => {
   const currentNonce = await ethers.provider.getTransactionCount(wallet.address);
 
   const authorizationData = {
-    chainId: '0xaa36a7',
+    chainId: '0x0aae6b',
     address: BATCH_CALL_DELEGATION_ADDRESS,
     nonce: ethers.toBeHex(currentNonce + 1),
   }
@@ -53,6 +57,7 @@ const main = async () => {
 
   // Generate and sign authorization data hash
   const authorizationDataHash = ethers.keccak256(encodedAuthorizationData);
+
   const authorizationSignature = wallet.signingKey.sign(authorizationDataHash);
 
   // Store signature components

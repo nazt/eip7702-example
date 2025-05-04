@@ -5,6 +5,7 @@ const path = require('path');
 const main = async () => {
   // Initialize wallet instance with private key and provider
   const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, ethers.provider);
+  console.log("Wallet address:", wallet.address);
 
   // Get contract factory for BatchCallDelegation smart contract
   const BatchCallDelegation = await ethers.getContractFactory("BatchCallDelegation", wallet);

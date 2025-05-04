@@ -5,13 +5,13 @@ require('dotenv').config();
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.27",
+    version: "0.8.28",
     settings: {
       evmVersion: "prague"
     }
   },
   networks: {
-    sepolia: {
+    sichang: {
       url: process.env.RPC_URL
     },
   },

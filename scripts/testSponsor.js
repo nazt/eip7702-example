@@ -3,22 +3,22 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Test the deployed Sponsor contract
- * This script demonstrates how to use the Sponsor contract for gas sponsorship
- * Using transaction type 4 for EIP-7702
+ * This script demonstrates using EIP-7702 for sponsored transactions
+ * with the Sponsor contract, where the user authorizes a transaction
+ * but the sponsor pays for gas.
  */
-const main = async () => {
-  // Initialize wallet instances with private keys and provider
+async function main() {
+  // Set up user wallet (authorizer) and sponsor wallet (gas payer)
   const user = new ethers.Wallet(process.env.PRIVATE_KEY, ethers.provider);
   const sponsor = new ethers.Wallet(process.env.PRIVATE_KEY_2, ethers.provider);
-  
+
   console.log("User address:", user.address);
   console.log("Sponsor address:", sponsor.address);
 
-  // Load the deployed Sponsor contract address
+  // Read the Sponsor contract deployment information
   const deploymentPath = path.join(__dirname, '../deployments', 'sichang_sponsor.json');
   if (!fs.existsSync(deploymentPath)) {
-    throw new Error('Sponsor contract deployment info not found');
+    throw new Error(`Sponsor deployment file not found for network: sichang`);
   }
   
   const deploymentInfo = JSON.parse(fs.readFileSync(deploymentPath, 'utf8'));
@@ -26,104 +26,95 @@ const main = async () => {
   
   console.log(`Using Sponsor contract at: ${SPONSOR_CONTRACT_ADDRESS}`);
 
-  // Create contract instance
-  const sponsorABI = [
-    "function sponsoredTransfer(address sender, address payable recipient, uint256 amount, uint256 nonce, uint8 v, bytes32 r, bytes32 s) external payable",
-    "function nonces(address sender) external view returns (uint256)",
-    "function gasSpent(address sender) external view returns (uint256)",
-    "function DOMAIN_SEPARATOR() external view returns (bytes32)"
-  ];
-  
-  const sponsorContract = new ethers.Contract(SPONSOR_CONTRACT_ADDRESS, sponsorABI, ethers.provider);
-  
-  // Set recipient and amount for the test transaction
-  const recipient = process.env.RECIPIENT_ADDRESS || sponsor.address;
-  const amount = ethers.parseEther("0.0001"); // Small amount for testing
+  // Define recipient and amount for the sponsored transfer
+  const recipient = process.env.RECIPIENT_ADDRESS || "0xa06b838A5c46D3736Dff107427fA0A4B43F3cc66";
+  const amount = ethers.parseEther("0.0001");
   
   console.log(`Recipient: ${recipient}`);
   console.log(`Amount: ${ethers.formatEther(amount)} ETH`);
 
-  // Get current nonce for the user
-  const nonce = await sponsorContract.nonces(user.address);
-  console.log(`Current nonce for user: ${nonce}`);
+  // Create interface for Sponsor contract
+  const sponsorInterface = new ethers.Interface([
+    "function sponsoredTransfer(address sender, address payable recipient, uint256 amount, uint256 nonce, uint8 v, bytes32 r, bytes32 s)",
+    "function nonces(address) view returns (uint256)",
+    "function gasSpent(address) view returns (uint256)"
+  ]);
 
-  // Get domain separator from the contract
-  const domainSeparator = await sponsorContract.DOMAIN_SEPARATOR();
-  
-  // EIP-712 typed data for the sponsored transfer
-  const typedData = {
-    types: {
-      EIP712Domain: [
-        { name: 'name', type: 'string' },
-        { name: 'version', type: 'string' },
-        { name: 'chainId', type: 'uint256' },
-        { name: 'verifyingContract', type: 'address' }
-      ],
-      SponsoredTransfer: [
-        { name: 'sender', type: 'address' },
-        { name: 'recipient', type: 'address' },
-        { name: 'amount', type: 'uint256' },
-        { name: 'nonce', type: 'uint256' }
-      ]
-    },
-    primaryType: 'SponsoredTransfer',
-    domain: {
-      name: 'Sponsor',
-      version: '1',
-      chainId: (await ethers.provider.getNetwork()).chainId,
-      verifyingContract: SPONSOR_CONTRACT_ADDRESS
-    },
-    message: {
-      sender: user.address,
-      recipient: recipient,
-      amount: amount,
-      nonce: nonce
-    }
+  // Create contract instance for reading data
+  const sponsorContract = new ethers.Contract(
+    SPONSOR_CONTRACT_ADDRESS,
+    sponsorInterface,
+    ethers.provider
+  );
+
+  // Get current nonce for the user
+  const currentNonce = await sponsorContract.nonces(user.address);
+  console.log(`Current nonce for user: ${currentNonce}`);
+
+  // Create domain data for EIP-712 signature
+  console.log("Generating EIP-712 signature...");
+  const domain = {
+    name: "Sponsor",
+    version: "1",
+    chainId: await ethers.provider.getNetwork().then(n => n.chainId),
+    verifyingContract: SPONSOR_CONTRACT_ADDRESS
   };
 
-  console.log("Generating EIP-712 signature...");
-  
-  // Create the EIP-712 signature
-  const signature = await user.signTypedData(
-    typedData.domain,
-    { SponsoredTransfer: typedData.types.SponsoredTransfer },
-    typedData.message
-  );
-  
-  // Split signature components
-  const { v, r, s } = ethers.Signature.from(signature);
-  
-  console.log("Signature generated successfully");
-  console.log("Signature details:", { v, r: r.substring(0, 10) + "...", s: s.substring(0, 10) + "..." });
+  // Define the types for EIP-712 structured data
+  const types = {
+    SponsoredTransfer: [
+      { name: "sender", type: "address" },
+      { name: "recipient", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "nonce", type: "uint256" }
+    ]
+  };
 
-  // *** NEW: Create type 4 transaction instead of standard contract call ***
-  
-  // Get current sponsor nonce for sending transaction
-  const sponsorNonce = await ethers.provider.getTransactionCount(sponsor.address);
-  
-  // Get current gas fee data from the network
-  const feeData = await ethers.provider.getFeeData();
-  
-  // Create contract interface for encoding function call
-  const iface = new ethers.Interface(sponsorABI);
-  
-  // Encode the sponsoredTransfer function call
-  const calldata = iface.encodeFunctionData("sponsoredTransfer", [
+  // Create the message to sign
+  const message = {
+    sender: user.address,
+    recipient: recipient,
+    amount: amount,
+    nonce: currentNonce
+  };
+
+  // Sign the typed data using EIP-712
+  const signature = await user.signTypedData(domain, types, message);
+  console.log("Signature generated successfully");
+
+  // Get the signature components (v, r, s)
+  const sig = ethers.Signature.from(signature);
+  console.log(`Signature details: { v: ${sig.v}, r: '${sig.r.slice(0, 10)}...', s: '${sig.s.slice(0, 10)}...' }`);
+
+  // Encode the function call to sponsoredTransfer
+  const calldata = sponsorInterface.encodeFunctionData("sponsoredTransfer", [
     user.address,
     recipient,
     amount,
-    nonce,
-    v,
-    r,
-    s
+    currentNonce,
+    sig.v,
+    sig.r,
+    sig.s
   ]);
+
+  // Get current gas fee data
+  const feeData = await ethers.provider.getFeeData();
   
-  // Create EIP-7702 authorization data
+  // Get network information
+  const network = await ethers.provider.getNetwork();
+  const chainIdHex = ethers.toBeHex(network.chainId);
+
+  // Get sponsor's current nonce
+  const sponsorNonce = await ethers.provider.getTransactionCount(sponsor.address);
+  console.log(`Sponsor nonce: ${sponsorNonce}`);
+
+  // Create authorization data structure for EIP-7702
+  console.log("Sending transaction type 4 (EIP-7702)...");
   const authorizationData = {
-    chainId: ethers.toBeHex((await ethers.provider.getNetwork()).chainId),
+    chainId: chainIdHex,
     address: SPONSOR_CONTRACT_ADDRESS,
-    nonce: ethers.toBeHex(sponsorNonce + 1),
-  }
+    nonce: ethers.toBeHex(sponsorNonce),
+  };
 
   // Encode authorization data according to EIP-712 standard
   const encodedAuthorizationData = ethers.concat([
@@ -135,7 +126,7 @@ const main = async () => {
     ])
   ]);
 
-  // Generate and sign authorization data hash by user
+  // Generate and sign authorization data hash with USER key
   const authorizationDataHash = ethers.keccak256(encodedAuthorizationData);
   const authorizationSignature = user.signingKey.sign(authorizationDataHash);
 
@@ -144,17 +135,22 @@ const main = async () => {
   authorizationData.r = authorizationSignature.r;
   authorizationData.s = authorizationSignature.s;
 
-  // Prepare complete transaction data structure
+  // Use legacy gas pricing if EIP-1559 fees not available
+  const gasPrice = feeData.gasPrice || ethers.parseUnits("10", "gwei");
+  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas || gasPrice;
+  const maxFeePerGas = feeData.maxFeePerGas || gasPrice;
+
+  // Create the EIP-7702 transaction data structure
   const txData = [
-    authorizationData.chainId,
+    chainIdHex,
     ethers.toBeHex(sponsorNonce),
-    ethers.toBeHex(feeData.maxPriorityFeePerGas), // Priority fee (tip)
-    ethers.toBeHex(feeData.maxFeePerGas), // Maximum total fee willing to pay
+    ethers.toBeHex(maxPriorityFeePerGas),
+    ethers.toBeHex(maxFeePerGas),
     ethers.toBeHex(1000000), // Gas limit
-    SPONSOR_CONTRACT_ADDRESS, // Sponsor address as sender
-    ethers.toBeHex(amount), // Value to send along with the transaction
-    calldata, // Encoded function call
-    [], // Access list (empty for this transaction)
+    sponsor.address, // Sponsor address (who pays for gas)
+    ethers.toBeHex(0), // No additional value sent with tx
+    calldata, // Function call data
+    [], // Access list (empty)
     [
       [
         authorizationData.chainId,
@@ -167,19 +163,19 @@ const main = async () => {
     ]
   ];
 
-  // Encode final transaction data with version prefix
+  // Encode the final transaction with EIP-7702 type (0x04)
   const encodedTxData = ethers.concat([
-    '0x04', // Transaction type 4 identifier for EIP-7702
+    '0x04', // Transaction type for EIP-7702
     ethers.encodeRlp(txData)
   ]);
 
-  // Sign the complete transaction with sponsor's key
+  // Have the SPONSOR sign the complete transaction
   const txDataHash = ethers.keccak256(encodedTxData);
   const txSignature = sponsor.signingKey.sign(txDataHash);
 
-  // Construct the fully signed transaction
+  // Create the complete signed transaction 
   const signedTx = ethers.hexlify(ethers.concat([
-    '0x04', // Transaction type 4
+    '0x04',
     ethers.encodeRlp([
       ...txData,
       txSignature.yParity == 0 ? '0x' : '0x01',
@@ -188,63 +184,57 @@ const main = async () => {
     ])
   ]));
 
-  console.log("Sending transaction type 4 (EIP-7702)...");
-  
-  // Send the raw transaction to the network
-  const txHash = await ethers.provider.send('eth_sendRawTransaction', [signedTx]);
-  
-  console.log(`Transaction sent: ${txHash}`);
-  
-  // Wait for transaction confirmation - Modified to handle provider limitations
-  console.log("Transaction sent successfully. Due to network limitations, we cannot wait for confirmation.");
-  console.log("You can check the transaction status manually with the hash: " + txHash);
-  
+  // Send the raw transaction
   try {
-    // Try to get the transaction receipt but don't fail if not supported
+    const txHash = await ethers.provider.send('eth_sendRawTransaction', [signedTx]);
+    console.log(`Transaction sent: ${txHash}`);
+    console.log("Transaction sent successfully. Due to network limitations, we cannot wait for confirmation.");
+    console.log(`You can check the transaction status manually with the hash: ${txHash}`);
+    
+    // Try to check status, but this might not work on all networks
     console.log("Attempting to check transaction status (may not be supported on this network)...");
-    
-    // Try different methods to check the transaction
-    const receipt = await ethers.provider.getTransactionReceipt(txHash);
-    
-    if (receipt) {
-      console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
-      console.log(`Gas used: ${receipt.gasUsed.toString()}`);
-    } else {
-      console.log("Transaction is still pending or receipt method is not supported");
+    try {
+      const receipt = await ethers.provider.getTransactionReceipt(txHash);
+      if (receipt) {
+        console.log(`Transaction status: ${receipt.status === 1 ? 'Success' : 'Failed'}`);
+        console.log(`Gas used: ${receipt.gasUsed}`);
+      } else {
+        console.log("Transaction is still pending or receipt method is not supported");
+      }
+    } catch (error) {
+      console.log("Could not get transaction receipt:", error.message);
     }
-  } catch (error) {
-    console.log("Could not check transaction status: " + error.message);
-    console.log("This is expected behavior on some networks and doesn't mean the transaction failed");
-  }
-  
-  // Sleep for a moment to give the transaction time to process
-  console.log("Waiting a few seconds before checking contract state...");
-  await new Promise(resolve => setTimeout(resolve, 5000));
-  
-  try {
-    // Check updated gas spent for user
+    
+    // Wait a bit before checking updated state
+    console.log("Waiting a few seconds before checking contract state...");
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    // Check gas spent by user
     const gasSpent = await sponsorContract.gasSpent(user.address);
-    console.log(`Total gas spent by user: ${gasSpent.toString()}`);
+    console.log(`Total gas spent by user: ${gasSpent}`);
     
     // Check new nonce
     const newNonce = await sponsorContract.nonces(user.address);
     console.log(`New nonce for user: ${newNonce}`);
     
-    // Verify if nonce increased (transaction likely processed)
-    if (newNonce > nonce) {
+    if (newNonce > currentNonce) {
       console.log("✅ Transaction appears to be successful (nonce was updated)");
     } else {
-      console.log("⚠️ Transaction may still be pending (nonce not yet updated)");
+      console.log("⚠️ Transaction may have failed (nonce was not updated)");
     }
+    
+    console.log("Test completed successfully");
+    
   } catch (error) {
-    console.log("Error checking contract state: " + error.message);
+    console.error("Error sending transaction:", error);
+    throw error;
   }
 }
 
-main().then(() => {
-  console.log('Test completed successfully');
-  process.exit(0);
-}).catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Execute the script
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
