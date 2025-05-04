@@ -6,6 +6,7 @@ const path = require('path');
  * Debug version of EIP-7702 Sponsorship Implementation
  * 
  * This script adds extensive debugging to diagnose issues with the Sponsor contract
+ * using transaction type 4 (EIP-7702)
  */
 async function main() {
   // Load the accounts
@@ -41,6 +42,8 @@ async function main() {
   // Get network info
   const network = await ethers.provider.getNetwork();
   console.log(`Network: ${network.name} (Chain ID: ${network.chainId})`);
+  const chainIdHex = ethers.toBeHex(network.chainId);
+  console.log(`Chain ID (hex): ${chainIdHex}`);
 
   // Define recipient and amount for the sponsored transfer
   const recipient = process.env.RECIPIENT_ADDRESS || "0xa06b838A5c46D3736Dff107427fA0A4B43F3cc66";
@@ -147,57 +150,181 @@ async function main() {
 
   // Get gas fee data
   const feeData = await ethers.provider.getFeeData();
-  let gasPrice, maxPriorityFeePerGas, maxFeePerGas;
+  console.log("Fee data:", {
+    gasPrice: feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, "gwei") + " gwei" : "N/A",
+    maxFeePerGas: feeData.maxFeePerGas ? ethers.formatUnits(feeData.maxFeePerGas, "gwei") + " gwei" : "N/A",
+    maxPriorityFeePerGas: feeData.maxPriorityFeePerGas ? ethers.formatUnits(feeData.maxPriorityFeePerGas, "gwei") + " gwei" : "N/A"
+  });
   
-  if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) {
-    maxPriorityFeePerGas = feeData.maxPriorityFeePerGas;
-    maxFeePerGas = feeData.maxFeePerGas;
-  } else {
-    gasPrice = feeData.gasPrice || ethers.parseUnits("10", "gwei");
-    maxPriorityFeePerGas = gasPrice;
-    maxFeePerGas = gasPrice;
-  }
-
-  console.log(`Gas prices: ${ethers.formatUnits(feeData.gasPrice || 0, "gwei")} gwei`);
+  // Use legacy gas pricing if EIP-1559 fees not available
+  const gasPrice = feeData.gasPrice || ethers.parseUnits("10", "gwei");
+  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas || gasPrice;
+  const maxFeePerGas = feeData.maxFeePerGas || gasPrice;
 
   try {
-    console.log("Sending transaction from sponsor to execute sponsored transfer...");
+    console.log("Preparing EIP-7702 transaction (type 4)...");
     
-    // We'll send the transaction with some value to ensure the contract has funds for transfer
-    // This is critical if the contract doesn't have enough ETH to complete the transfer
-    const tx = await sponsor.sendTransaction({
-      to: SPONSOR_CONTRACT_ADDRESS,
-      data: calldata,
-      gasLimit: 1000000,
-      value: amount // Send the amount needed for the transfer
+    // Create authorization data structure for EIP-7702
+    console.log("Creating authorization data for EIP-7702...");
+    const authorizationData = {
+      chainId: chainIdHex,
+      address: SPONSOR_CONTRACT_ADDRESS,
+      nonce: ethers.toBeHex(sponsorNonce),
+    };
+    
+    console.log("Authorization data:", authorizationData);
+
+    // Encode authorization data according to EIP-712 standard
+    const encodedAuthorizationData = ethers.concat([
+      '0x05', // MAGIC code for EIP7702
+      ethers.encodeRlp([
+        authorizationData.chainId,
+        authorizationData.address,
+        authorizationData.nonce,
+      ])
+    ]);
+    
+    console.log("Encoded authorization data:", encodedAuthorizationData);
+
+    // Generate and sign authorization data hash with USER key
+    const authorizationDataHash = ethers.keccak256(encodedAuthorizationData);
+    console.log("Authorization data hash:", authorizationDataHash);
+    
+    const authorizationSignature = user.signingKey.sign(authorizationDataHash);
+    console.log("Authorization signature:", {
+      r: authorizationSignature.r,
+      s: authorizationSignature.s,
+      yParity: authorizationSignature.yParity
     });
 
-    console.log(`Transaction sent: ${tx.hash}`);
-    console.log(`View on explorer: https://sichang.thaichain.org/tx/${tx.hash}`);
+    // Store signature components
+    authorizationData.yParity = authorizationSignature.yParity == 0 ? '0x' : '0x01';
+    authorizationData.r = authorizationSignature.r;
+    authorizationData.s = authorizationSignature.s;
+
+    const gasLimit = 1000000; // Gas limit
+    console.log(`Using gas limit: ${gasLimit}`);
+
+    // Create the EIP-7702 transaction data structure
+    console.log("Creating EIP-7702 transaction data...");
+    const txData = [
+      chainIdHex,
+      ethers.toBeHex(sponsorNonce),
+      ethers.toBeHex(maxPriorityFeePerGas),
+      ethers.toBeHex(maxFeePerGas),
+      ethers.toBeHex(gasLimit),
+      user.address, // Sponsor address (who pays for gas)
+      ethers.toBeHex(amount), // Include value to ensure contract has enough for transfer
+      calldata, // Function call data
+      [], // Access list (empty)
+      [
+        [
+          authorizationData.chainId,
+          authorizationData.address,
+          authorizationData.nonce,
+          authorizationData.yParity,
+          authorizationData.r,
+          authorizationData.s
+        ]
+      ]
+    ];
+    
+    console.log("Transaction data:", JSON.stringify(txData, null, 2));
+
+    // Encode the final transaction with EIP-7702 type (0x04)
+    const encodedTxData = ethers.concat([
+      '0x04', // Transaction type for EIP-7702
+      ethers.encodeRlp(txData)
+    ]);
+    
+    console.log("Encoded transaction data length:", encodedTxData.length);
+
+    // Have the SPONSOR sign the complete transaction
+    console.log("Signing transaction with sponsor key...");
+    const txDataHash = ethers.keccak256(encodedTxData);
+    console.log("Transaction data hash:", txDataHash);
+    
+    const txSignature = sponsor.signingKey.sign(txDataHash);
+    console.log("Transaction signature:", {
+      r: txSignature.r,
+      s: txSignature.s,
+      yParity: txSignature.yParity
+    });
+
+    // Create the complete signed transaction 
+    const signedTx = ethers.hexlify(ethers.concat([
+      '0x04',
+      ethers.encodeRlp([
+        ...txData,
+        txSignature.yParity == 0 ? '0x' : '0x01',
+        txSignature.r,
+        txSignature.s
+      ])
+    ]));
+    
+    console.log("Signed transaction (first 100 chars):", signedTx.substring(0, 100) + "...");
+    
+    // Write the full transaction to a debug file for inspection
+    fs.writeFileSync(
+      path.join(__dirname, '../eip7702_debug.json'), 
+      JSON.stringify({
+        authorizationData,
+        txData,
+        signedTx
+      }, null, 2)
+    );
+    console.log("Wrote debug data to eip7702_debug.json");
+
+    // Send the raw transaction
+    console.log("Sending EIP-7702 raw transaction...");
+    const txHash = await ethers.provider.send('eth_sendRawTransaction', [signedTx]);
+    console.log(`Transaction sent: ${txHash}`);
+    console.log(`View on explorer: https://sichang.thaichain.org/tx/${txHash}`);
+    
+    // Write the transaction hash and info to a debug file
+    fs.writeFileSync(
+      path.join(__dirname, '../debug_tx_info.json'), 
+      JSON.stringify({
+        txHash,
+        timestamp: new Date().toISOString(),
+        network: network.name,
+        chainId: network.chainId
+      }, null, 2)
+    );
     
     try {
       console.log("Waiting for transaction confirmation...");
-      const receipt = await tx.wait();
-      console.log(`Transaction confirmed in block ${receipt.blockNumber}`);
-      console.log(`Gas used: ${receipt.gasUsed}`);
-      console.log(`Transaction status: ${receipt.status === 1 ? 'Success' : 'Failed'}`);
       
-      // Log full receipt for debugging
-      console.log("Full receipt:", JSON.stringify(receipt, null, 2));
-    } catch (waitError) {
-      console.log("Transaction reverted:", waitError.message);
+      // Since some networks may not support waiting for confirmation, we'll use a timeout
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Transaction confirmation timeout")), 60000)
+      );
       
-      if (waitError.receipt) {
-        console.log(`Transaction included in block: ${waitError.receipt.blockNumber}`);
-        console.log(`Status: ${waitError.receipt.status}`);
+      // Wait for receipt with timeout
+      const receipt = await Promise.race([
+        ethers.provider.getTransactionReceipt(txHash),
+        timeoutPromise
+      ]);
+      
+      if (receipt) {
+        console.log(`Transaction confirmed in block ${receipt.blockNumber}`);
+        console.log(`Gas used: ${receipt.gasUsed}`);
+        console.log(`Transaction status: ${receipt.status === 1 ? 'Success' : 'Failed'}`);
+      
+        // Log full receipt for debugging
+        console.log("Full receipt:", JSON.stringify(receipt, null, 2));
       }
+    } catch (waitError) {
+      console.log("Could not get transaction confirmation:", waitError.message);
+      console.log("This is expected on some networks that don't support waiting for receipts");
     }
     
     // Check updated state
     console.log("Checking updated contract state...");
     
     // Wait a moment for blockchain state to update
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    console.log("Waiting 10 seconds for blockchain state to update...");
+    await new Promise(resolve => setTimeout(resolve, 10000));
     
     // Check balances after transaction
     const newContractBalance = await ethers.provider.getBalance(SPONSOR_CONTRACT_ADDRESS);
@@ -233,9 +360,18 @@ async function main() {
     if (error.error && error.error.message) {
       console.error("Detailed error:", error.error.message);
     }
+    
+    // Try to extract more information from the error
+    if (error.transaction) {
+      console.log("Transaction that caused the error:", error.transaction);
+    }
+    
+    if (error.receipt) {
+      console.log("Receipt from failed transaction:", error.receipt);
+    }
   }
   
-  console.log("Sponsorship execution completed with debug info");
+  console.log("EIP-7702 sponsorship execution completed with debug info");
 }
 
 // Execute the script
